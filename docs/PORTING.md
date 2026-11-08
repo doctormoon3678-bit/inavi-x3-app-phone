@@ -154,7 +154,41 @@ com.thinkware.dixon.installmanager          <- 본체를 설치하는 관리자
 최대치**를 TWRP 패키지로 만들었습니다. 커널·부트로더·HAL·모뎀은 손대지
 않으므로 기기가 못 켜지는 일은 없습니다.
 
-### `out/INAVI_X3_N916S-core.zip` (22 MB)
+### 플랫폼별로 패키지가 나뉘는 이유
+
+안드로이드 버전에 따라 **시스템 앱 배치 규칙이 다릅니다.**
+
+| | 안드로이드 4.x | 안드로이드 5.0+ |
+|---|---|---|
+| apk 위치 | `/system/app/Foo.apk` (평면) | `/system/app/Foo/Foo.apk` |
+| JNI `.so` | `/system/lib/` | `<앱 폴더>/lib/arm/` |
+
+4.4의 `PackageManagerService.scanDirLI` 는 `/system/app` 안의 `*.apk` 파일만
+보고 **하위 디렉터리는 건너뜁니다.** 그래서 5.0용 배치로 설치하면 파일은
+들어가지만 앱이 아예 인식되지 않습니다(오류도 안 납니다). 반대로 6.0에
+평면 배치를 쓰면 설치는 되지만 권장 구조가 아닙니다.
+
+그래서 `--layout` 별로 두 벌을 만듭니다. 설치 프로그램은 zip 안의
+`inavi/sdk.txt` 를 읽어 기기 SDK와 맞지 않으면 아무것도 건드리지 않고
+중단합니다.
+
+| 패키지 | 대상 | 비고 |
+|---|---|---|
+| `INAVI_X3-core-android6.zip` | SDK 23 (6.0.x) | 앱 15종 전부 |
+| `INAVI_X3-core-android4.4.zip` | SDK 19 (4.4.x) | `minSdk 23` 인 DummyHappywayard 제외 → 14종 |
+| `INAVI_X3-systemui-android6-EXPERIMENTAL.zip` | SDK 23 | 4.4용은 없음 (아래 참고) |
+| `INAVI_X3-uninstall.zip` | 공통 | 두 배치 모두 정리 |
+
+4.4용 systemui 패키지가 없는 이유는 `NaviSystemUI` 가 `minSdk 23`,
+`NaviSettings` 가 `minSdk 21` 이라 킷캣에는 애초에 설치되지 않기 때문입니다.
+
+**안드로이드 4.4에서의 한계**: 위 앱들은 minSdk 조건은 통과하지만 대부분
+안드로이드 6.0 프레임워크를 대상으로 빌드됐습니다(예: IvyLauncher
+`targetSdk 23`). 5.0/6.0에서 추가된 API를 호출하는 지점에서
+`NoSuchMethodError` 로 죽을 수 있습니다. **기기를 6.0.x 로 올린 뒤
+`android6` 패키지를 쓰는 쪽이 훨씬 안전합니다.**
+
+### `INAVI_X3-core-android6.zip` (22 MB)
 
 | 설치 위치 | 패키지 | 설명 |
 |---|---|---|
@@ -187,7 +221,7 @@ com.thinkware.dixon.installmanager          <- 본체를 설치하는 관리자
 - 모든 apk는 dex 바이트코드를 전수 검사해 ART 전용 명령어(`*-quick`,
   `return-void-no-barrier`)가 남아있지 않음을 확인했습니다.
 
-### `out/INAVI_X3_N916S-systemui-EXPERIMENTAL.zip` (4 MB)
+### `INAVI_X3-systemui-android6-EXPERIMENTAL.zip` (4 MB)
 
 요청하신 NaviSystemUI·NaviSettings 교체본입니다. **위험합니다.**
 
@@ -199,7 +233,7 @@ com.thinkware.dixon.installmanager          <- 본체를 설치하는 관리자
   `INAVI_X3_I_UNDERSTAND` 를 직접 만들어야 합니다 (실수 방지).
 - 문제가 생기면 제거 zip으로 되돌립니다.
 
-### `out/INAVI_X3_N916S-uninstall.zip`
+### `INAVI_X3-uninstall.zip`
 
 설치한 파일 전부를 지우고, 이 설치 프로그램이 만든 백업을 **오래된 것부터
 순서대로** 복원합니다.
@@ -209,7 +243,8 @@ com.thinkware.dixon.installmanager          <- 본체를 설치하는 관리자
 ## 4. 설치 방법
 
 1. TWRP 진입 → **Backup** 으로 현재 상태 전체 백업 (필수).
-2. `INAVI_X3_N916S-core.zip` 플래시.
+2. 기기 안드로이드 버전에 맞는 core zip 플래시
+   (6.0.x → `INAVI_X3-core-android6.zip`, 4.4.x → `INAVI_X3-core-android4.4.zip`).
    - `Mount` 에서 *system partition read-only* 가 꺼져 있어야 합니다.
 3. 재부팅. **첫 부팅은 dex2oat 때문에 5~15분** 걸립니다.
 4. 홈 버튼 → 런처 선택창에서 **아이나비 런처** 선택.
@@ -218,11 +253,11 @@ com.thinkware.dixon.installmanager          <- 본체를 설치하는 관리자
 설치 프로그램이 하는 사전 점검:
 
 - `/system` 쓰기 가능 여부 (안 되면 안내 후 중단)
-- `ro.build.version.sdk == 23`
+- `ro.build.version.sdk` 가 zip 의 `inavi/sdk.txt` 와 일치
 - ABI에 `armeabi-v7a` 포함
 - `/system` 여유 공간
 
-되돌리기: `INAVI_X3_N916S-uninstall.zip` 플래시, 또는 TWRP 터미널에서
+되돌리기: `INAVI_X3-uninstall.zip` 플래시, 또는 TWRP 터미널에서
 `sh /data/media/0/INAVI_X3_backup_*/restore.sh`.
 
 ---
@@ -237,7 +272,7 @@ com.thinkware.dixon.installmanager          <- 본체를 설치하는 관리자
 | TPEG(Steward) | 내비 본체가 있어야 의미 있음 |
 | DriveX, BSDService | 전용 UART·카메라 하드웨어가 없어 동작 불가 (설치만) |
 | 내비게이션 본체 | **zip에 없음** — 아래 6번 |
-| NaviSystemUI / NaviSettings | 삼성 순정에서는 거의 확실히 실패 (실험용) |
+| NaviSystemUI / NaviSettings | 삼성 순정에서는 거의 확실히 실패 (실험용). 4.4 기기에는 minSdk 때문에 설치 자체가 불가 |
 | DPI | X3는 160dpi 기준 → N916S에서 UI가 작게 보입니다. `/system/build.prop` 수정 없이 개발자 옵션의 최소 폭(dp) 조정으로 맞추는 편이 안전합니다 |
 
 ---
@@ -335,8 +370,14 @@ sudo tools/test_installer.sh out /tmp/inavi-test
   (`jarsigner` 가 원본 apk를 `weak algorithm ... disabled` 로 거부하는 것은
   JDK 21 정책이며 안드로이드 6과 무관합니다.)
 - `installer/update-binary` 는 420 MB ext4 이미지를 `/system` 에 마운트한
-  가짜 SM-N916S 환경에서, TWRP와 똑같이 **zip 안에서 추출한 뒤 실행**해
-  검증했습니다 (`tools/test_installer.sh`, 검사 16건 전부 통과):
+  가짜 기기 환경에서, TWRP와 똑같이 **zip 안에서 추출한 뒤 실행**해
+  검증했습니다 (`tools/test_installer.sh`, 검사 33건 전부 통과):
+  - SDK 게이트 양방향 — 6.0 패키지를 4.4.4 기기에, 4.4 패키지를 6.0.1 기기에
+    넣으면 아무것도 설치하지 않고 중단
+  - 4.4 배치 — 평면 apk 13개, 하위 디렉터리 0, JNI가 `/system/lib`,
+    lib-tas 가 `/system/framework` 이고 선언 경로도 일치, `minSdk 23` 앱 제외
+  - 6.0 배치 — 앱 디렉터리 14개, 평면 apk 0, JNI가 `<앱>/lib/arm`
+  - 제거 패키지가 4.4 평면 배치도 완전히 정리
   - `/data` 를 쓸 수 없을 때 — core는 경고 후 설치하고 램디스크에 백업
     쓰레기를 남기지 않음
   - `/data` 를 쓸 수 없을 때 — 순정을 지우는 systemui 패키지는 **순정에

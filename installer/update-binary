@@ -116,7 +116,19 @@ fi
 [ -f $TMPDIR/inavi/info.txt ] && while read -r l; do ui_print "$l"; done <$TMPDIR/inavi/info.txt
 
 # --- 호환성 게이트: 여기서 막히면 기기가 아니라 패키지가 안 맞는 것입니다
-[ "$SDK" = "23" ] || abort "이 패키지는 안드로이드 6.0.x (SDK 23) 전용입니다. 현재 SDK $SDK."
+#     안드로이드 버전마다 시스템 앱 배치 규칙이 달라서(4.x 평면 / 5.0+ 하위
+#     디렉터리) 버전이 다르면 설치해도 앱이 아예 인식되지 않습니다.
+WANT=$(cat $TMPDIR/inavi/sdk.txt 2>/dev/null)
+[ -z "$WANT" ] && WANT=23
+HIT=0
+for s in $WANT; do [ "$s" = "$SDK" ] && HIT=1; done
+if [ "$HIT" = "0" ]; then
+  ui_print " "
+  ui_print "이 패키지가 지원하는 SDK: $WANT"
+  ui_print "이 기기의 SDK          : $SDK"
+  ui_print " "
+  abort "안드로이드 버전이 맞지 않습니다. 기기 버전에 맞는 패키지를 쓰세요."
+fi
 case "$ABIS" in
   *armeabi-v7a*) ;;
   *) abort "32비트 ARM(armeabi-v7a) ROM 전용입니다. 현재 ABI: $ABIS";;
