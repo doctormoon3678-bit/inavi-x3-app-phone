@@ -4,13 +4,14 @@
 # TWRP invokes this as:  update-binary <api_version> <command_fd> <zipfile>
 # Install mode   : the zip carries a system/ tree, which is copied into /system.
 # Uninstall mode : the zip carries inavi/remove.txt, whose paths are deleted and
-#                  then restored from the newest backup this installer made.
+#                  then restored from the backups this installer made.
+#
+# Written for busybox ash (TWRP's /sbin/sh): POSIX only, no bashisms, and no
+# `echo -e`, whose flag handling differs between ash, dash and bash.
 
 OUTFD=$2
 ZIPFILE=$3
 
-# printf, not `echo -e`: busybox ash, dash and bash disagree about echo flags,
-# and a literal "-e" in the recovery log is the usual symptom.
 ui_print() {
   printf 'ui_print %s\nui_print\n' "$1" >>/proc/self/fd/$OUTFD
 }
@@ -38,6 +39,24 @@ fi
 
 touch $SYS/.inavix3_rwtest 2>/dev/null || abort "/system 이 읽기 전용입니다. TWRP의 'Mount system partition read-only' 를 끄세요."
 rm -f $SYS/.inavix3_rwtest
+
+# /data and /cache are needed for the backup and for clearing dalvik-cache.
+# TWRP does not always have them mounted when a zip is flashed.
+mount /data >/dev/null 2>&1
+mount /cache >/dev/null 2>&1
+mount /sdcard >/dev/null 2>&1
+
+# Pick a backup root that survives a reboot. Writing to an unmounted
+# /data/media/0 would silently land on the recovery ramdisk and be lost.
+BKROOT=""
+for cand in /data/media/0 /data/media /sdcard /external_sd /usb-otg; do
+  [ -d "$cand" ] || continue
+  if mkdir -p "$cand/.inavix3_wtest" 2>/dev/null; then
+    rmdir "$cand/.inavix3_wtest" 2>/dev/null
+    BKROOT="$cand"
+    break
+  fi
+done
 
 gp() { sed -n "s/^$1=//p" $SYS/build.prop 2>/dev/null | head -n1; }
 
@@ -69,19 +88,24 @@ if [ -f $TMPDIR/inavi/remove.txt ]; then
   done <$TMPDIR/inavi/remove.txt
   ui_print "   설치 파일 $n 개 삭제"
 
-  # restore every backup this installer made, oldest first, so that a core
-  # install followed by a systemui install both get rolled back
+  # restore every backup this installer made, oldest first, so a core install
+  # followed by a systemui install both get rolled back
   nr=0
-  for B in $(ls -d /data/media/0/INAVI_X3_backup_* 2>/dev/null); do
-    [ -d "$B/system" ] || continue
-    ui_print "   원본 복원: $B"
-    cp -r "$B/system/." $SYS/ 2>/dev/null && nr=$((nr + 1))
+  for root in /data/media/0 /data/media /sdcard /external_sd /usb-otg; do
+    [ -d "$root" ] || continue
+    for B in "$root"/INAVI_X3_backup_*; do
+      [ -d "$B/system" ] || continue
+      ui_print "   원본 복원: $B"
+      cp -r "$B/system/." $SYS/ 2>/dev/null && nr=$((nr + 1))
+    done
   done
   if [ "$nr" = "0" ]; then
     ui_print "   복원할 백업이 없습니다 (교체된 순정 파일이 없었다면 정상)"
   else
     ui_print "   백업 $nr 개 복원 완료"
   fi
+  rm -rf /data/dalvik-cache/* /cache/dalvik-cache/* >/dev/null 2>&1
+  sync
   ui_print " "
   ui_print ">> 제거 완료. 재부팅하세요. 첫 부팅은 오래 걸립니다."
   umount /system >/dev/null 2>&1
@@ -98,8 +122,27 @@ case "$ABIS" in
   *) abort "32비트 ARM(armeabi-v7a) ROM 전용입니다. 현재 ABI: $ABIS";;
 esac
 
+REPLACES_STOCK=0
+[ -f $TMPDIR/inavi/predelete.txt ] && REPLACES_STOCK=1
+
+# A package that removes stock apks must be able to put them somewhere safe.
+if [ -z "$BKROOT" ]; then
+  if [ "$REPLACES_STOCK" = "1" ]; then
+    abort "백업을 저장할 곳이 없습니다. TWRP에서 Mount > Data 를 켠 뒤 다시 설치하세요."
+  fi
+  ui_print "경고: /data 를 쓸 수 없어 백업을 남기지 못합니다."
+  ui_print "      (이 패키지는 순정 파일을 덮어쓰지 않으므로 계속 진행합니다)"
+  BK=$TMPDIR/nobackup
+else
+  BK=$BKROOT/INAVI_X3_backup_$(date +%Y%m%d-%H%M%S 2>/dev/null || echo manual)
+fi
+
 if [ -f $TMPDIR/inavi/require_optin ]; then
-  if [ ! -f /data/media/0/INAVI_X3_I_UNDERSTAND ] && [ ! -f /sdcard/INAVI_X3_I_UNDERSTAND ]; then
+  OPTIN=0
+  for root in /data/media/0 /data/media /sdcard /external_sd; do
+    [ -f "$root/INAVI_X3_I_UNDERSTAND" ] && OPTIN=1
+  done
+  if [ "$OPTIN" = "0" ]; then
     ui_print " "
     ui_print "이 패키지는 상태바/설정을 교체하는 실험용입니다."
     ui_print "부트루프 또는 상태바 소실 위험이 큽니다."
@@ -124,32 +167,34 @@ ui_print ">> 파일 추출"
 unzip -o "$ZIPFILE" 'system/*' -d $TMPDIR >/dev/null 2>&1
 [ -d $TMPDIR/system ] || abort "zip 안에 system/ 트리가 없습니다."
 
+# File lists via a temp file read line by line: `for f in $(find ...)` would
+# split on whitespace inside a path.
+( cd $TMPDIR/system && find . -type f ) >$TMPDIR/files.lst
+( cd $TMPDIR/system && find . -type d ) >$TMPDIR/dirs.lst
+
 # --- 백업: 덮어쓰게 되는 순정 파일만
-BK=/data/media/0/INAVI_X3_backup_$(date +%Y%m%d-%H%M%S 2>/dev/null || echo manual)
 ui_print ">> 교체 대상 백업"
-mkdir -p $BK/system
+mkdir -p "$BK/system"
 nb=0
-cd $TMPDIR/system
-for f in $(find . -type f); do
+while read -r f; do
   rel=${f#.}
   if [ -e "$SYS$rel" ]; then
-    mkdir -p "$BK/system$(dirname $rel)"
+    mkdir -p "$BK/system$(dirname "$rel")"
     cp -p "$SYS$rel" "$BK/system$rel" 2>/dev/null && nb=$((nb + 1))
   fi
-done
-cd /
+done <$TMPDIR/files.lst
 
 # --- 같은 패키지명을 가진 순정 앱 디렉터리를 비켜두어야 하는 경우
 #     (예: X3 SystemUI/Settings 로 교체) — 백업한 뒤 삭제한다
-if [ -f $TMPDIR/inavi/predelete.txt ]; then
+if [ "$REPLACES_STOCK" = "1" ]; then
   while read -r p; do
     [ -z "$p" ] && continue
     case "$p" in \#*) continue;; esac
     for t in $SYS$p; do
       [ -e "$t" ] || continue
       rel=${t#$SYS}
-      mkdir -p "$BK/system$(dirname $rel)"
-      cp -rp "$t" "$BK/system$(dirname $rel)/" 2>/dev/null && nb=$((nb + 1))
+      mkdir -p "$BK/system$(dirname "$rel")"
+      cp -rp "$t" "$BK/system$(dirname "$rel")/" 2>/dev/null && nb=$((nb + 1))
       rm -rf "$t"
       ui_print "   순정 제거: $rel"
     done
@@ -167,37 +212,36 @@ CHCON=""
 for c in /sbin/chcon /system/bin/chcon chcon; do
   $c u:object_r:system_file:s0 $SYS/build.prop >/dev/null 2>&1 && CHCON=$c && break
 done
-cd $TMPDIR/system
-for f in $(find . -type f); do
+while read -r f; do
   rel=${f#.}
   chown 0:0 "$SYS$rel" 2>/dev/null
   chmod 0644 "$SYS$rel" 2>/dev/null
   [ -n "$CHCON" ] && $CHCON u:object_r:system_file:s0 "$SYS$rel" 2>/dev/null
-done
-for d in $(find . -type d); do
+done <$TMPDIR/files.lst
+while read -r d; do
   rel=${d#.}
   [ -z "$rel" ] && continue
   chown 0:0 "$SYS$rel" 2>/dev/null
   chmod 0755 "$SYS$rel" 2>/dev/null
   [ -n "$CHCON" ] && $CHCON u:object_r:system_file:s0 "$SYS$rel" 2>/dev/null
-done
-cd /
+done <$TMPDIR/dirs.lst
 [ -z "$CHCON" ] && ui_print "   (chcon 없음 - 라벨은 부팅 시 재설정에 의존합니다)"
 
 # --- 복원 스크립트를 백업 폴더에 남긴다
-cat >$BK/restore.sh <<'EOS'
+if [ -n "$BKROOT" ]; then
+  cat >"$BK/restore.sh" <<'EOS'
 #!/sbin/sh
-# TWRP 터미널에서:  sh /data/media/0/INAVI_X3_backup_*/restore.sh
-D=$(dirname $0)
+# TWRP 터미널에서:  sh <이 파일의 경로>
+D=$(dirname "$0")
 mount /system 2>/dev/null; mount -o rw,remount /system 2>/dev/null
-cp -r $D/system/. /system/ && echo "원본 복원 완료"
+cp -r "$D/system/." /system/ && echo "원본 복원 완료"
 EOS
-chmod 0755 $BK/restore.sh 2>/dev/null
+  chmod 0755 "$BK/restore.sh" 2>/dev/null
+fi
 
 # --- dex 캐시를 비워 첫 부팅에 새 apk 가 다시 컴파일되게 한다
 ui_print ">> dalvik 캐시 정리"
 rm -rf /data/dalvik-cache/* /cache/dalvik-cache/* >/dev/null 2>&1
-rm -rf /data/system/package*.xml.bak >/dev/null 2>&1
 
 sync
 umount /system >/dev/null 2>&1
@@ -205,7 +249,11 @@ umount /system >/dev/null 2>&1
 ui_print " "
 ui_print "========================================"
 ui_print " 설치 완료"
-ui_print " 백업: $BK"
+if [ -n "$BKROOT" ]; then
+  ui_print " 백업: $BK"
+else
+  ui_print " 백업: 없음 (덮어쓴 순정 파일이 없습니다)"
+fi
 ui_print " 되돌리기: 제거(uninstall) zip 플래시"
 ui_print "========================================"
 ui_print " 첫 부팅은 dex2oat 때문에 5~15분 걸립니다."

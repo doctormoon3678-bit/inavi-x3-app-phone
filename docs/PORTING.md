@@ -318,6 +318,12 @@ python3 tools/build_package.py --firmware /tmp/x3/mnt --out out --work /tmp/w \
 | `tools/elfneeded.py` | `.so` 의 DT_NEEDED/SONAME 조회 |
 | `tools/build_package.py` | TWRP zip 3종 생성 |
 | `installer/update-binary` | TWRP 셸 설치 스크립트 (설치/제거 공용) |
+| `tools/test_installer.sh` | 설치 스크립트 자동 검증 (root + 루프 장치 필요) |
+
+```bash
+# 설치 스크립트 검증 (컨테이너/VM에서만 — /system 을 마운트합니다)
+sudo tools/test_installer.sh out /tmp/inavi-test
+```
 
 ### 검증 내역
 
@@ -329,6 +335,16 @@ python3 tools/build_package.py --firmware /tmp/x3/mnt --out out --work /tmp/w \
   (`jarsigner` 가 원본 apk를 `weak algorithm ... disabled` 로 거부하는 것은
   JDK 21 정책이며 안드로이드 6과 무관합니다.)
 - `installer/update-binary` 는 420 MB ext4 이미지를 `/system` 에 마운트한
-  가짜 SM-N916S 환경에서 **설치 → 순정 제거·백업 → 제거 → 순정 복원** 전체
-  사이클을 실행해 확인했습니다. 권한 `644`/`755` `root:root`, JNI 배치,
-  순정 `platform.xml` 무변경까지 확인했습니다.
+  가짜 SM-N916S 환경에서, TWRP와 똑같이 **zip 안에서 추출한 뒤 실행**해
+  검증했습니다 (`tools/test_installer.sh`, 검사 16건 전부 통과):
+  - `/data` 를 쓸 수 없을 때 — core는 경고 후 설치하고 램디스크에 백업
+    쓰레기를 남기지 않음
+  - `/data` 를 쓸 수 없을 때 — 순정을 지우는 systemui 패키지는 **순정에
+    손대기 전에 중단** (백업을 잃을 수 있으므로)
+  - zip 경로에 공백이 있을 때
+  - core → systemui → 제거 전체 사이클: 백업 3개 복원, 순정 SystemUI/설정
+    복원, 아이나비 잔류 파일 0, 순정 `platform.xml` 무변경
+- 권한 `644`/`755` `root:root` 와 JNI 라이브러리 배치도 함께 확인했습니다.
+- 셸 호환성: 스크립트는 POSIX만 사용하고 `echo -e` 를 쓰지 않습니다
+  (`printf` 사용). 검증은 `dash` 로 했습니다 — TWRP의 busybox `ash` 는 이
+  컨테이너에 없고 패키지 설치가 막혀 직접 실행하지는 못했습니다.
